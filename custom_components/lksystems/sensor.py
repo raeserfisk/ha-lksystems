@@ -501,6 +501,11 @@ class LKArcSensorEntity(CoordinatorEntity, SensorEntity):
         return False
 
     @property
+    def device_class(self) -> Optional[str]:
+        """Return the device class."""
+        return self._device_class
+
+    @property
     def native_value(self) -> Any:
         """Return the value of the sensor."""
         # First check device_details for the most up-to-date information
