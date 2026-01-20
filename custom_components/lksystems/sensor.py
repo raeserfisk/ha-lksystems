@@ -927,13 +927,11 @@ class LKCubicSensor(AbstractLkCubicSensor):
                 value = self._coordinator.data["cubic_configuration"][self._data_key]
             elif "." in self._data_key:
                 keys = self._data_key.split(".")
-                val_config = self._coordinator.data["cubic_configuration"]
+                value = self._coordinator.data["cubic_configuration"]
                 for key in keys:
-                    val_config = val_config.get(key, None)
-                    if val_config is None:
+                    value = value.get(key, None)
+                    if value is None:
                         break
-                else:
-                    value = val_config
         elif self._data_source == "measurement":
             _LOGGER.debug("Getting measurement for key: %s", self._data_key)
             _LOGGER.debug(self._coordinator.data["cubic_last_measurement"])
@@ -941,13 +939,11 @@ class LKCubicSensor(AbstractLkCubicSensor):
                 value = self._coordinator.data["cubic_last_measurement"][self._data_key]
             elif "." in self._data_key:
                 keys = self._data_key.split(".")
-                val_meas = self._coordinator.data["cubic_last_measurement"]
+                value = self._coordinator.data["cubic_last_measurement"]
                 for key in keys:
-                    val_meas = val_meas.get(key, None)
-                    if val_meas is None:
+                    value = value.get(key, None)
+                    if value is None:
                         break
-                else:
-                    value = val_meas
 
         if value is not None and self.device_class == SensorDeviceClass.TIMESTAMP:
             try:
