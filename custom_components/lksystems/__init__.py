@@ -51,7 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 CONSECUTIVE_FAILURE_THRESHOLD = 3
 
 # Define the platforms we support
-PLATFORMS = [Platform.SENSOR, Platform.CLIMATE]
+PLATFORMS = [Platform.SENSOR, Platform.CLIMATE, Platform.VALVE]
 
 
 class LkStructureResp(TypedDict):
