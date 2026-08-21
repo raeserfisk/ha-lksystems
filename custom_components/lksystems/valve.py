@@ -11,15 +11,16 @@ from homeassistant.components.valve import (
     ValveEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import LKSystemCoordinator
 from .const import CUBIC_SECURE_MODEL, DOMAIN, MANUFACTURER
+from .pylksystems import LKSystemsManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -186,31 +187,46 @@ class LKCubicSecureValve(CoordinatorEntity[LKSystemCoordinator], ValveEntity):
             "reconciliation_grace_seconds": VALVE_RECONCILIATION_GRACE,
         }
 
-    def _device_registry_id(self) -> str:
-        """Resolve the existing Home Assistant device registry ID."""
-        device_entry = dr.async_get(self.hass).async_get_device(
-            identifiers={(DOMAIN, self._device_identity)}
-        )
-        if device_entry is None:
-            raise HomeAssistantError(
-                f"No Home Assistant device found for Cubic Secure "
-                f"{self._device_identity}"
-            )
-        return device_entry.id
+    async def _send_valve_command(self, target_state: str) -> None:
+        """Send a checked command directly to LK Systems."""
+        username = self.coordinator._entry.data.get(CONF_USERNAME)
+        password = self.coordinator._entry.data.get(CONF_PASSWORD)
 
-    async def _async_set_valve(self, service: str, target_state: str) -> None:
-        """Run the existing LK valve service and update effective state."""
+        try:
+            async with LKSystemsManager(username, password) as lk_inst:
+                if not await lk_inst.login():
+                    raise HomeAssistantError("Failed to login to LK Systems")
+
+                if target_state == "open":
+                    result = await lk_inst.cubic_secure_open_valve(
+                        self._device_identity
+                    )
+                else:
+                    result = await lk_inst.cubic_secure_close_valve(
+                        self._device_identity
+                    )
+
+                if result is False:
+                    raise HomeAssistantError(
+                        f"LK Systems rejected {target_state} command for valve "
+                        f"{self._device_identity}"
+                    )
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError(
+                f"Failed to {target_state} Cubic Secure valve "
+                f"{self._device_identity}"
+            ) from err
+
+    async def _async_set_valve(self, target_state: str) -> None:
+        """Send the valve command and update the effective local state."""
         action = "opening" if target_state == "open" else "closing"
         self._action_in_progress = action
         self.async_write_ha_state()
 
         try:
-            await self.hass.services.async_call(
-                DOMAIN,
-                service,
-                {"device_id": self._device_registry_id()},
-                blocking=True,
-            )
+            await self._send_valve_command(target_state)
         except Exception:
             # A failed command must never change the effective state.
             self._action_in_progress = None
@@ -230,8 +246,8 @@ class LKCubicSecureValve(CoordinatorEntity[LKSystemCoordinator], ValveEntity):
 
     async def async_open_valve(self) -> None:
         """Open the Cubic Secure valve."""
-        await self._async_set_valve("open_valve", "open")
+        await self._async_set_valve("open")
 
     async def async_close_valve(self) -> None:
         """Close the Cubic Secure valve."""
-        await self._async_set_valve("close_valve", "closed")
+        await self._async_set_valve("closed")
