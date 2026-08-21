@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import time
 
 from homeassistant.components.valve import (
     ValveDeviceClass,
@@ -11,7 +11,7 @@ from homeassistant.components.valve import (
     ValveEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
@@ -23,10 +23,11 @@ from .const import CUBIC_SECURE_MODEL, DOMAIN, MANUFACTURER
 
 _LOGGER = logging.getLogger(__name__)
 
-# Give Cubic Secure and the LK cloud a moment to apply the command before
-# asking for a fresh configuration. This avoids waiting for the normal
-# coordinator polling interval while not repeatedly polling the cloud API.
-VALVE_REFRESH_DELAY = 15
+# LK's cloud can briefly report the pre-command valve state even after a
+# successful physical operation. During this window, a contradictory cloud
+# value is treated as stale. A matching cloud value confirms the command
+# immediately, and any contradictory value after the grace period wins.
+VALVE_RECONCILIATION_GRACE = 60
 
 
 async def async_setup_entry(
@@ -61,9 +62,11 @@ class LKCubicSecureValve(CoordinatorEntity[LKSystemCoordinator], ValveEntity):
         super().__init__(coordinator)
         self._device_identity = device_identity
         self._attr_unique_id = f"LkUid_valve_{device_identity}"
-        self._action_in_progress = False
-        self._expected_action: str | None = None
-        self._last_action: str | None = None
+
+        self._effective_state = self._cloud_valve_state
+        self._state_source = "cloud" if self._effective_state is not None else "unknown"
+        self._last_command_at: float | None = None
+        self._action_in_progress: str | None = None
 
         machine_info = coordinator.data["cubic_devices"][device_identity][
             "machine_info"
@@ -85,8 +88,8 @@ class LKCubicSecureValve(CoordinatorEntity[LKSystemCoordinator], ValveEntity):
         )
 
     @property
-    def _raw_valve_state(self) -> str | None:
-        """Return the normalized valve state from Cubic Secure config."""
+    def _cloud_valve_state(self) -> str | None:
+        """Return the normalized valve state last reported by LK cloud."""
         configuration = (
             self.coordinator.data.get("cubic_devices", {})
             .get(self._device_identity, {})
@@ -94,7 +97,51 @@ class LKCubicSecureValve(CoordinatorEntity[LKSystemCoordinator], ValveEntity):
             or {}
         )
         state = configuration.get("valveState")
-        return str(state).lower() if state is not None else None
+        if state is None:
+            return None
+        normalized = str(state).lower()
+        return normalized if normalized in {"open", "closed"} else None
+
+    def _reconcile_with_cloud(self) -> None:
+        """Reconcile the effective local state with the latest cloud value."""
+        cloud_state = self._cloud_valve_state
+        if cloud_state is None:
+            return
+
+        if self._effective_state is None:
+            self._effective_state = cloud_state
+            self._state_source = "cloud"
+            self._last_command_at = None
+            return
+
+        # A matching cloud value confirms a recent local command immediately.
+        if cloud_state == self._effective_state:
+            self._state_source = "cloud"
+            self._last_command_at = None
+            return
+
+        if self._last_command_at is not None:
+            command_age = time.monotonic() - self._last_command_at
+            if command_age < VALVE_RECONCILIATION_GRACE:
+                _LOGGER.debug(
+                    "Ignoring stale Cubic Secure cloud state %s for %s; "
+                    "effective state is %s and command is %.1fs old",
+                    cloud_state,
+                    self._device_identity,
+                    self._effective_state,
+                    command_age,
+                )
+                return
+
+        _LOGGER.warning(
+            "Cubic Secure cloud state corrected effective valve state for %s: %s -> %s",
+            self._device_identity,
+            self._effective_state,
+            cloud_state,
+        )
+        self._effective_state = cloud_state
+        self._state_source = "cloud"
+        self._last_command_at = None
 
     @property
     def available(self) -> bool:
@@ -105,73 +152,39 @@ class LKCubicSecureValve(CoordinatorEntity[LKSystemCoordinator], ValveEntity):
         )
 
     @property
-    def state(self) -> str | None:
-        """Return the valve state, using action intent during transition."""
-        if self._action_in_progress:
-            if self._expected_action == "closing":
-                _LOGGER.debug("state=closed (in_progress closing)")
-                return "closed"
-            if self._expected_action == "opening":
-                _LOGGER.debug("state=open (in_progress opening)")
-                return "open"
-        if self._last_action == "close_valve":
-            _LOGGER.debug("state=closed (last_action close_valve)")
-            return "closed"
-        if self._last_action == "open_valve":
-            _LOGGER.debug("state=open (last_action open_valve)")
-            return "open"
-        result = super().state
-        _LOGGER.debug("state=%s (fallback, _raw=%s, _last=%s)", result, self._raw_valve_state, self._last_action)
-        return result
-
-    @property
     def is_closed(self) -> bool | None:
-        """Return whether the valve is closed."""
-        state = self._raw_valve_state
-        if state == "closed":
+        """Return whether the valve is effectively closed."""
+        if self._effective_state == "closed":
             return True
-        if state == "open":
+        if self._effective_state == "open":
             return False
         return None
 
     @property
     def is_opening(self) -> bool | None:
-        """Return whether the valve is opening."""
-        if self._action_in_progress and self._expected_action == "opening":
-            return True
-        state = self._raw_valve_state
-        if state is None:
-            return None
-        return state == "opening"
+        """Return whether an open command is currently being sent."""
+        return self._action_in_progress == "opening"
 
     @property
     def is_closing(self) -> bool | None:
-        """Return whether the valve is closing."""
-        if self._action_in_progress and self._expected_action == "closing":
-            return True
-        state = self._raw_valve_state
-        if state is None:
-            return None
-        return state == "closing"
+        """Return whether a close command is currently being sent."""
+        return self._action_in_progress == "closing"
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Clear action-in-progress flags after coordinator refresh."""
-        self._last_action = None
-        if self._action_in_progress:
-            self._action_in_progress = False
-            self._expected_action = None
-            self.async_write_ha_state()
+        """Reconcile effective state whenever LK cloud data is refreshed."""
+        self._reconcile_with_cloud()
         super()._handle_coordinator_update()
 
     @property
-    def extra_state_attributes(self) -> dict[str, str]:
-        """Return status attribute during valve transition."""
-        if self._action_in_progress and self._expected_action:
-            return {
-                "status": f"{self._expected_action.capitalize()} — waiting for cloud",
-            }
-        return {}
+    def extra_state_attributes(self) -> dict[str, str | int | None]:
+        """Expose effective and cloud states for diagnostics."""
+        return {
+            "effective_state": self._effective_state,
+            "cloud_state": self._cloud_valve_state,
+            "state_source": self._state_source,
+            "reconciliation_grace_seconds": VALVE_RECONCILIATION_GRACE,
+        }
 
     def _device_registry_id(self) -> str:
         """Resolve the existing Home Assistant device registry ID."""
@@ -185,42 +198,40 @@ class LKCubicSecureValve(CoordinatorEntity[LKSystemCoordinator], ValveEntity):
             )
         return device_entry.id
 
-    async def _async_set_valve(self, service: str) -> None:
-        """Run the existing LK valve service and refresh its state."""
-        _LOGGER.info("Valve action started: %s", service)
-        self._action_in_progress = True
-        self._expected_action = "opening" if service == "open_valve" else "closing"
+    async def _async_set_valve(self, service: str, target_state: str) -> None:
+        """Run the existing LK valve service and update effective state."""
+        action = "opening" if target_state == "open" else "closing"
+        self._action_in_progress = action
         self.async_write_ha_state()
 
-        await self.hass.services.async_call(
-            DOMAIN,
-            service,
-            {"device_id": self._device_registry_id()},
-            blocking=True,
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                service,
+                {"device_id": self._device_registry_id()},
+                blocking=True,
+            )
+        except Exception:
+            # A failed command must never change the effective state.
+            self._action_in_progress = None
+            self.async_write_ha_state()
+            raise
+
+        self._effective_state = target_state
+        self._state_source = "command"
+        self._last_command_at = time.monotonic()
+        self._action_in_progress = None
+        _LOGGER.info(
+            "Cubic Secure valve %s effective state set to %s after successful command",
+            self._device_identity,
+            target_state,
         )
-
-        # Record the action intent *before* the sleep so the valve entity
-        # reflects the commanded state during the entire transition window.
-        # The LK cloud may still report the old state for ~10 s after the
-        # physical valve moves, so we deliberately skip a coordinator
-        # refresh. The existing valve-state sensor will pick up the new
-        # state on the next normal coordinator poll.
-        self._last_action = service
-        _LOGGER.info("Valve action complete, _last_action=%s, state=%s", self._last_action, self.state)
-        self.async_write_ha_state()
-
-        await asyncio.sleep(VALVE_REFRESH_DELAY)
-        _LOGGER.info("After sleep: _last_action=%s, state=%s", self._last_action, self.state)
-        self._action_in_progress = False
-        self._expected_action = None
         self.async_write_ha_state()
 
     async def async_open_valve(self) -> None:
         """Open the Cubic Secure valve."""
-        _LOGGER.info("Opening Cubic Secure valve %s", self._device_identity)
-        await self._async_set_valve("open_valve")
+        await self._async_set_valve("open_valve", "open")
 
     async def async_close_valve(self) -> None:
         """Close the Cubic Secure valve."""
-        _LOGGER.info("Closing Cubic Secure valve %s", self._device_identity)
-        await self._async_set_valve("close_valve")
+        await self._async_set_valve("close_valve", "closed")
