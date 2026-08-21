@@ -4,7 +4,6 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant, ServiceCall, callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
     device_registry as dr,
 )
@@ -54,55 +53,43 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     @callback
     async def close_valve(call: ServiceCall) -> None:
-        """Close a Cubic Secure valve and surface failures to the caller."""
+        """Handle the service action call."""
         device_id = call.data.get("device_id")
         sn = _get_serial_number(hass, device_id)
         if not sn:
-            raise HomeAssistantError("Unable to resolve Cubic Secure device")
-        _LOGGER.info("Closing valve %s", sn)
+            return
+        _LOGGER.info(f"Closing valve {sn}")
         try:
             username = entry.data.get(CONF_USERNAME)
             password = entry.data.get(CONF_PASSWORD)
 
             async with LKSystemsManager(username, password) as lk_inst:
                 if not await lk_inst.login():
-                    raise HomeAssistantError("Failed to login to LK Systems")
-                result = await lk_inst.cubic_secure_close_valve(sn)
-                if result is False:
-                    raise HomeAssistantError(
-                        f"LK Systems rejected close command for valve {sn}"
-                    )
-        except HomeAssistantError:
-            raise
+                    _LOGGER.error("Failed to login, abort update")
+                    raise Exception("Failed to login")
+                await lk_inst.cubic_secure_close_valve(sn)
         except Exception as e:
-            _LOGGER.exception("Error closing valve %s", sn)
-            raise HomeAssistantError(f"Failed to close valve {sn}") from e
+            _LOGGER.error("Error closing valve: %s", e)
 
     @callback
     async def open_valve(call: ServiceCall) -> None:
-        """Open a Cubic Secure valve and surface failures to the caller."""
+        """Handle the service action call."""
         device_id = call.data.get("device_id")
         sn = _get_serial_number(hass, device_id)
         if not sn:
-            raise HomeAssistantError("Unable to resolve Cubic Secure device")
-        _LOGGER.info("Opening valve %s", sn)
+            return
+        _LOGGER.info(f"Open valve {sn}")
         try:
             username = entry.data.get(CONF_USERNAME)
             password = entry.data.get(CONF_PASSWORD)
 
             async with LKSystemsManager(username, password) as lk_inst:
                 if not await lk_inst.login():
-                    raise HomeAssistantError("Failed to login to LK Systems")
-                result = await lk_inst.cubic_secure_open_valve(sn)
-                if result is False:
-                    raise HomeAssistantError(
-                        f"LK Systems rejected open command for valve {sn}"
-                    )
-        except HomeAssistantError:
-            raise
+                    _LOGGER.error("Failed to login, abort update")
+                    raise Exception("Failed to login")
+                await lk_inst.cubic_secure_open_valve(sn)
         except Exception as e:
-            _LOGGER.exception("Error opening valve %s", sn)
-            raise HomeAssistantError(f"Failed to open valve {sn}") from e
+            _LOGGER.error("Error open valve: %s", e)
 
     @callback
     async def set_pressure_test_schedule(call: ServiceCall) -> None:
