@@ -67,7 +67,8 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             async with LKSystemsManager(username, password) as lk_inst:
                 if not await lk_inst.login():
                     raise HomeAssistantError("Failed to login to LK Systems")
-                if not await lk_inst.cubic_secure_close_valve(sn):
+                result = await lk_inst.cubic_secure_close_valve(sn)
+                if result is False:
                     raise HomeAssistantError(
                         f"LK Systems rejected close command for valve {sn}"
                     )
@@ -92,7 +93,8 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             async with LKSystemsManager(username, password) as lk_inst:
                 if not await lk_inst.login():
                     raise HomeAssistantError("Failed to login to LK Systems")
-                if not await lk_inst.cubic_secure_open_valve(sn):
+                result = await lk_inst.cubic_secure_open_valve(sn)
+                if result is False:
                     raise HomeAssistantError(
                         f"LK Systems rejected open command for valve {sn}"
                     )
