@@ -65,7 +65,7 @@ async def test_successful_close_updates_effective_state_immediately(hass, fake_m
     )
 
     with patch(
-        "custom_components.lksystems.services.LKSystemsManager",
+        "custom_components.lksystems.valve.LKSystemsManager",
         return_value=fake_manager,
     ):
         await hass.services.async_call(
@@ -95,7 +95,7 @@ async def test_stale_cloud_state_does_not_undo_recent_command(hass, fake_manager
     valve_entity_id = entity_id(hass, VALVE_DOMAIN, VALVE_UNIQUE_ID)
 
     with patch(
-        "custom_components.lksystems.services.LKSystemsManager",
+        "custom_components.lksystems.valve.LKSystemsManager",
         return_value=fake_manager,
     ):
         await hass.services.async_call(
@@ -129,7 +129,7 @@ async def test_cloud_corrects_effective_state_after_grace(hass, fake_manager):
     valve_entity_id = entity_id(hass, VALVE_DOMAIN, VALVE_UNIQUE_ID)
 
     with patch(
-        "custom_components.lksystems.services.LKSystemsManager",
+        "custom_components.lksystems.valve.LKSystemsManager",
         return_value=fake_manager,
     ):
         await hass.services.async_call(
@@ -168,7 +168,7 @@ async def test_failed_close_does_not_change_effective_state(hass, fake_manager):
     fake_manager.cubic_secure_close_valve = AsyncMock(return_value=False)
 
     with patch(
-        "custom_components.lksystems.services.LKSystemsManager",
+        "custom_components.lksystems.valve.LKSystemsManager",
         return_value=fake_manager,
     ):
         with pytest.raises(HomeAssistantError):
