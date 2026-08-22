@@ -76,7 +76,8 @@ async def test_successful_close_updates_effective_state_immediately(hass, fake_m
         )
         await hass.async_block_till_done()
 
-    state = hass.states[valve_entity_id]
+    state = hass.states.get(valve_entity_id)
+    assert state is not None
     assert ("cubic_secure_close_valve", CUBIC_IDENTITY) in fake_manager.calls
     assert state.state == "closed"
     assert state.attributes["effective_state"] == "closed"
@@ -116,7 +117,8 @@ async def test_stale_cloud_state_does_not_undo_recent_command(hass, fake_manager
         await coordinator.async_refresh()
         await hass.async_block_till_done()
 
-    state = hass.states[valve_entity_id]
+    state = hass.states.get(valve_entity_id)
+    assert state is not None
     assert state.state == "closed"
     assert state.attributes["effective_state"] == "closed"
     assert state.attributes["cloud_state"] == "open"
@@ -154,7 +156,8 @@ async def test_cloud_corrects_effective_state_after_grace(hass, fake_manager):
         await coordinator.async_refresh()
         await hass.async_block_till_done()
 
-    state = hass.states[valve_entity_id]
+    state = hass.states.get(valve_entity_id)
+    assert state is not None
     assert state.state == "open"
     assert state.attributes["effective_state"] == "open"
     assert state.attributes["cloud_state"] == "open"
@@ -179,7 +182,8 @@ async def test_failed_close_does_not_change_effective_state(hass, fake_manager):
                 blocking=True,
             )
 
-    state = hass.states[valve_entity_id]
+    state = hass.states.get(valve_entity_id)
+    assert state is not None
     assert state.state == "open"
     assert state.attributes["effective_state"] == "open"
     assert state.attributes["state_source"] == "cloud"
