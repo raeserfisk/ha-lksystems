@@ -105,6 +105,7 @@ class FakeLKSystemsManager:
 
         # Configurable outcomes for each call, so tests can force failures.
         self.login_result = True
+        self.cubic_secure_pause_leak_detection_result = True
         self.get_user_structure_result = True
         self.get_device_measurement_result = True
         self.get_device_configuration_result = True
@@ -198,6 +199,7 @@ class FakeLKSystemsManager:
         self.calls.append(
             ("cubic_secure_pause_leak_detection", cubic_identity, seconds)
         )
+        return self.cubic_secure_pause_leak_detection_result
 
     async def cubic_secure_set_pressure_test_schedule(
         self, cubic_identity, hour, minute

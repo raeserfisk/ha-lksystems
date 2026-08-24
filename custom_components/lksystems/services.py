@@ -1,12 +1,15 @@
 from .pylksystems import LKSystemsManager, LKThresholds, LKPressureThresholds
 import logging
+from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
     device_registry as dr,
 )
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -38,18 +41,30 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
         sn = _get_serial_number(hass, device_id)
         if not sn:
             return
-        _LOGGER.info(f"Closing valve {sn}")
+        _LOGGER.info(
+            "Pausing leak detection for %s for %d seconds", sn, seconds
+        )
         try:
             username = entry.data.get(CONF_USERNAME)
             password = entry.data.get(CONF_PASSWORD)
 
             async with LKSystemsManager(username, password) as lk_inst:
                 if not await lk_inst.login():
-                    _LOGGER.error("Failed to login, abort update")
+                    _LOGGER.error("Failed to login, aborting pause")
                     raise Exception("Failed to login")
-                await lk_inst.cubic_secure_pause_leak_detection(sn, seconds)
+                paused = await lk_inst.cubic_secure_pause_leak_detection(sn, seconds)
+                if not paused:
+                    raise Exception("LK API did not confirm the pause")
+                _LOGGER.info(
+                    "Leak detection paused for %s until %s",
+                    sn,
+                    (dt_util.now() + timedelta(seconds=seconds)).isoformat(),
+                )
         except Exception as e:
-            _LOGGER.error("Error closing valve: %s", e)
+            _LOGGER.error("Error pausing leak detection for %s: %s", sn, e)
+            raise HomeAssistantError(
+                f"Failed to pause leak detection for {sn}: {e}"
+            ) from e
 
     @callback
     async def close_valve(call: ServiceCall) -> None:

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -84,6 +85,22 @@ async def test_pause_leak_detection_calls_client(hass, fake_manager):
         CUBIC_IDENTITY,
         1800,
     ) in fake_manager.calls
+
+
+async def test_pause_leak_detection_failure_raises(hass, fake_manager):
+    """A failed LK call raises, so callers (scripts, automations) can tell
+    the pause was not applied instead of assuming it was."""
+    _, device_entry = await _setup_entry_and_get_cubic_device(hass, fake_manager)
+    fake_manager.cubic_secure_pause_leak_detection_result = False
+
+    with _patch_services_manager(fake_manager):
+        with pytest.raises(HomeAssistantError):
+            await hass.services.async_call(
+                DOMAIN,
+                "pause_leak_detection",
+                {"device_id": device_entry.id, "seconds": 1800},
+                blocking=True,
+            )
 
 
 async def test_set_pressure_test_schedule_calls_client(hass, fake_manager):
