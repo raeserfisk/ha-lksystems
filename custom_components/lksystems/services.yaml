@@ -35,6 +35,17 @@ pause_leak_detection:
           step: 1
           mode: box
       required: true
+resume_leak_detection:
+  name: Resume leak detection
+  description: Resumes leak detection before the pause has expired
+  fields:
+    device_id:
+      name: Device id
+      description: The device id of LK Systems device to resume leak detection on
+      selector:
+        device:
+          integration: "lksystems"
+      required: true
 
 close_valve:
   name: Close valve

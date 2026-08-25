@@ -1,6 +1,5 @@
 from .pylksystems import LKSystemsManager, LKThresholds, LKPressureThresholds
 import logging
-from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
@@ -9,7 +8,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
     device_registry as dr,
 )
-from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -41,29 +39,45 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
         sn = _get_serial_number(hass, device_id)
         if not sn:
             return
+        # Route through the leak detection switch entity so the pause is
+        # tracked locally (the cloud only reports it with a lag).
+        entity = hass.data[DOMAIN][entry.entry_id].leak_detection_entities.get(sn)
+        if entity is None:
+            _LOGGER.error("No leak detection entity found for %s", sn)
+            raise HomeAssistantError(
+                f"No leak detection entity found for {sn}"
+            )
         _LOGGER.info(
             "Pausing leak detection for %s for %d seconds", sn, seconds
         )
         try:
-            username = entry.data.get(CONF_USERNAME)
-            password = entry.data.get(CONF_PASSWORD)
-
-            async with LKSystemsManager(username, password) as lk_inst:
-                if not await lk_inst.login():
-                    _LOGGER.error("Failed to login, aborting pause")
-                    raise Exception("Failed to login")
-                paused = await lk_inst.cubic_secure_pause_leak_detection(sn, seconds)
-                if not paused:
-                    raise Exception("LK API did not confirm the pause")
-                _LOGGER.info(
-                    "Leak detection paused for %s until %s",
-                    sn,
-                    (dt_util.now() + timedelta(seconds=seconds)).isoformat(),
-                )
+            await entity.async_turn_off(seconds=seconds)
         except Exception as e:
             _LOGGER.error("Error pausing leak detection for %s: %s", sn, e)
             raise HomeAssistantError(
                 f"Failed to pause leak detection for {sn}: {e}"
+            ) from e
+
+    @callback
+    async def resume_leak_detection(call: ServiceCall) -> None:
+        """Handle the service action call."""
+        device_id = call.data.get("device_id")
+        sn = _get_serial_number(hass, device_id)
+        if not sn:
+            return
+        entity = hass.data[DOMAIN][entry.entry_id].leak_detection_entities.get(sn)
+        if entity is None:
+            _LOGGER.error("No leak detection entity found for %s", sn)
+            raise HomeAssistantError(
+                f"No leak detection entity found for {sn}"
+            )
+        _LOGGER.info("Resuming leak detection for %s", sn)
+        try:
+            await entity.async_turn_on()
+        except Exception as e:
+            _LOGGER.error("Error resuming leak detection for %s: %s", sn, e)
+            raise HomeAssistantError(
+                f"Failed to resume leak detection for {sn}: {e}"
             ) from e
 
     @callback
@@ -184,6 +198,9 @@ async def async_setup_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     # Register our service with Home Assistant.
     hass.services.async_register(DOMAIN, "pause_leak_detection", pause_leak_detection)
+    hass.services.async_register(
+        DOMAIN, "resume_leak_detection", resume_leak_detection
+    )
     hass.services.async_register(DOMAIN, "close_valve", close_valve)
     hass.services.async_register(DOMAIN, "open_valve", open_valve)
     hass.services.async_register(

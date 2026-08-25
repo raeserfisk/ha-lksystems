@@ -51,7 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 CONSECUTIVE_FAILURE_THRESHOLD = 3
 
 # Define the platforms we support
-PLATFORMS = [Platform.SENSOR, Platform.CLIMATE, Platform.VALVE]
+PLATFORMS = [Platform.SENSOR, Platform.CLIMATE, Platform.VALVE, Platform.SWITCH]
 
 
 class LkStructureResp(TypedDict):
@@ -228,6 +228,11 @@ class LKSystemCoordinator(DataUpdateCoordinator[LkStructureResp]):
         self._last_update_time = dt_util.now()
         self._entry_id = entry.entry_id
         self._consecutive_failures = 0
+
+        # Live leak detection switch entities, keyed by device identity.
+        # Populated by the switch platform; the integration services use
+        # these to dispatch parameterized pauses/resumes.
+        self.leak_detection_entities: dict = {}
 
         # Initialize coordinator with update interval
         super().__init__(

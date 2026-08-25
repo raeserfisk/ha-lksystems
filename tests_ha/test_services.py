@@ -10,6 +10,7 @@ hass.services.async_call().
 
 from __future__ import annotations
 
+import contextlib
 from unittest.mock import patch
 
 import pytest
@@ -23,10 +24,24 @@ from custom_components.lksystems.const import DOMAIN
 from .conftest import CUBIC_IDENTITY
 
 
+@contextlib.contextmanager
 def _patch_services_manager(manager):
-    return patch(
-        "custom_components.lksystems.services.LKSystemsManager", return_value=manager
-    )
+    """Patch the LKSystemsManager import in every module that can send commands.
+
+    The pause/resume services route through the switch entity, so both the
+    services module and the switch module need the fake.
+    """
+    with (
+        patch(
+            "custom_components.lksystems.services.LKSystemsManager",
+            return_value=manager,
+        ),
+        patch(
+            "custom_components.lksystems.switch.LKSystemsManager",
+            return_value=manager,
+        ),
+    ):
+        yield
 
 
 async def _setup_entry_and_get_cubic_device(hass, manager):
