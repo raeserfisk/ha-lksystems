@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
@@ -108,11 +108,6 @@ class LKCubicSecureLeakDetection(
         self._last_command_at: float | None = None
         self._command_in_progress: str | None = None
 
-        # Local pause bookkeeping: we know exactly when a pause we issued
-        # ends, which the cloud only reports with a lag.
-        self._pause_ends_at: datetime | None = None
-        self._pause_seconds: int | None = None
-
         machine_info = coordinator.data["cubic_devices"][device_identity][
             "machine_info"
         ]
@@ -147,16 +142,27 @@ class LKCubicSecureLeakDetection(
             return None
         return str(state).lower() == "forceopen"
 
+    def _pause_record(self) -> dict | None:
+        """Return this device's locally issued pause record, if any.
+
+        The record ({"ends_at": datetime, "seconds": int}) lives on the
+        coordinator so the pause-remaining sensor can display the same
+        countdown without a second copy of the truth.
+        """
+        return self.coordinator.cubic_pause_state.get(self._device_identity)
+
     def _local_pause_active(self) -> bool:
         """Return whether a locally issued pause is still running."""
-        return self._pause_ends_at is not None and dt_util.now() < self._pause_ends_at
+        record = self._pause_record()
+        return record is not None and dt_util.now() < record["ends_at"]
 
     def _sync_local_pause_expiry(self) -> None:
         """Flip the effective state on when a locally issued pause expires."""
+        record = self._pause_record()
         if (
-            self._pause_ends_at is not None
+            record is not None
             and self._effective_on is False
-            and dt_util.now() >= self._pause_ends_at
+            and dt_util.now() >= record["ends_at"]
         ):
             self._effective_on = True
             self._state_source = "command"
@@ -210,6 +216,11 @@ class LKCubicSecureLeakDetection(
         self._effective_on = cloud_on
         self._state_source = "cloud"
         self._last_command_at = None
+        if cloud_on and self._local_pause_active():
+            # The cloud says detection is active again while a local pause
+            # is still running (for instance a resume from the LK app):
+            # drop the now stale local record.
+            self.coordinator.cubic_pause_state.pop(self._device_identity, None)
 
     @property
     def available(self) -> bool:
@@ -236,20 +247,33 @@ class LKCubicSecureLeakDetection(
     @property
     def extra_state_attributes(self) -> dict[str, str | int | bool | None]:
         """Expose effective, cloud and local pause data for diagnostics."""
-        paused_until: str | None = None
-        if self._pause_ends_at is not None:
-            paused_until = self._pause_ends_at.isoformat()
+        record = self._pause_record()
         return {
             "cloud_paused": self._cloud_paused,
             "state_source": self._state_source,
             "command_in_progress": self._command_in_progress,
-            "pause_seconds": self._pause_seconds,
-            "paused_until": paused_until,
+            "pause_seconds": record["seconds"] if record else None,
+            "paused_until": (
+                record["ends_at"].isoformat() if record else None
+            ),
             "reconciliation_grace_seconds": LEAK_DETECTION_RECONCILIATION_GRACE,
         }
 
     def _default_pause_seconds(self) -> int:
-        """Return the default pause duration from the duration helper, if any."""
+        """Return the default pause duration in seconds.
+
+        Priority: the integration's own pause duration number entity, then
+        the legacy duration helper (for installs that predate the entity),
+        then the built-in default.
+        """
+        duration_entity = self.coordinator.pause_duration_entities.get(
+            self._device_identity
+        )
+        if duration_entity is not None:
+            minutes = duration_entity.native_value
+            if minutes is not None:
+                return max(int(minutes * 60), 60)
+
         state = self.hass.states.get(PAUSE_DURATION_HELPER)
         if state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             try:
@@ -316,8 +340,10 @@ class LKCubicSecureLeakDetection(
         self._state_source = "command"
         self._last_command_at = time.monotonic()
         pause_ends_at = dt_util.now() + timedelta(seconds=seconds)
-        self._pause_ends_at = pause_ends_at
-        self._pause_seconds = seconds
+        self.coordinator.cubic_pause_state[self._device_identity] = {
+            "ends_at": pause_ends_at,
+            "seconds": seconds,
+        }
         self._command_in_progress = None
         _LOGGER.info(
             "Leak detection %s paused until %s (%d seconds)",
@@ -326,6 +352,9 @@ class LKCubicSecureLeakDetection(
             seconds,
         )
         self.async_write_ha_state()
+        # Tell the coordinator's listeners (the pause-remaining sensor)
+        # immediately instead of waiting for the next scheduled refresh.
+        self.coordinator.async_set_updated_data(self.coordinator.data)
 
     async def async_turn_on(self, **kwargs) -> None:
         """Resume leak detection."""
@@ -350,14 +379,16 @@ class LKCubicSecureLeakDetection(
         self._effective_on = True
         self._state_source = "command"
         self._last_command_at = time.monotonic()
-        self._pause_ends_at = None
-        self._pause_seconds = None
+        self.coordinator.cubic_pause_state.pop(self._device_identity, None)
         self._command_in_progress = None
         _LOGGER.info(
             "Leak detection %s resumed after successful command",
             self._device_identity,
         )
         self.async_write_ha_state()
+        # Tell the coordinator's listeners (the pause-remaining sensor)
+        # immediately instead of waiting for the next scheduled refresh.
+        self.coordinator.async_set_updated_data(self.coordinator.data)
 
         # Pull a fresh cloud report a moment later so the state is
         # confirmed as soon as LK's cache turns over.

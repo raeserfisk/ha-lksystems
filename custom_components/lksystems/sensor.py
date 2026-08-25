@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, Optional
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -16,10 +17,12 @@ from homeassistant.const import (
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     UnitOfTemperature,
+    UnitOfTime,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
@@ -172,6 +175,10 @@ async def async_setup_entry(
                                 data_source="configuration",
                             )
                         )
+
+                cubic_entities.append(
+                    LKCubicSecurePauseRemaining(coordinator, device_identity)
+                )
 
                 async_add_entities(cubic_entities, True)
 
@@ -1019,5 +1026,157 @@ class LKCubicSensor(AbstractLkCubicSensor):
                 return dt_util.utc_from_timestamp(float(value))
             except (ValueError, TypeError):
                 pass
-        
+         
         return value
+
+
+class LKCubicSecurePauseRemaining(CoordinatorEntity[LKSystemCoordinator], SensorEntity):
+    """Live countdown of a Cubic Secure leak detection pause.
+
+    The HA core timer domain is a collection-based helper rather than a
+    platform domain, so an integration cannot ship a native timer entity.
+    This sensor is the integration's pause timer: while a locally issued
+    pause is running it reports the remaining seconds, ticking once per
+    second. A pause that started elsewhere (for instance in the LK app)
+    has no known duration and reports as unknown.
+    """
+
+    _attr_attribution = ATTRIBUTION
+    _attr_has_entity_name = True
+    _attr_name = "Pause remaining"
+    _attr_icon = "mdi:timer-sand"
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        coordinator: LKSystemCoordinator,
+        device_identity: str,
+    ) -> None:
+        """Initialize the pause remaining sensor."""
+        super().__init__(coordinator)
+        self._device_identity = device_identity
+        self._attr_unique_id = f"LkUid_pause_remaining_{device_identity}"
+
+        # Unsubscribable for the per-second tick; None when not ticking.
+        self._tick_unsub: Callable[[], None] | None = None
+
+        machine_info = coordinator.data["cubic_devices"][device_identity][
+            "machine_info"
+        ]
+        zone_name = machine_info.get("zone", {}).get("zoneName")
+        device_name = (
+            f"Cubic Secure {zone_name}" if zone_name else "Cubic Secure"
+        )
+
+        # These identifiers deliberately match the leak detection switch so
+        # the sensor attaches to the existing Cubic Secure device in HA
+        # rather than creating a duplicate device.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device_identity)},
+            manufacturer=MANUFACTURER,
+            model=CUBIC_SECURE_MODEL,
+            name=device_name,
+            serial_number=device_identity,
+        )
+
+    @property
+    def _pause_record(self) -> dict | None:
+        """Return this device's locally issued pause record, if any."""
+        return self.coordinator.cubic_pause_state.get(self._device_identity)
+
+    @property
+    def _cloud_paused(self) -> bool | None:
+        """Return whether LK cloud currently reports leak detection paused."""
+        leak = (
+            self.coordinator.data.get("cubic_devices", {})
+            .get(self._device_identity, {})
+            .get("last_measurement", {})
+            .get("leak")
+            or {}
+        )
+        state = leak.get("leakState")
+        if state is None:
+            return None
+        return str(state).lower() == "forceopen"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the seconds of pause time remaining.
+
+        Zero when not paused; None when a pause is cloud-reported without
+        a known duration (for example one started from the LK app).
+        """
+        record = self._pause_record
+        if record is not None:
+            return max(
+                int((record["ends_at"] - dt_util.now()).total_seconds()), 0
+            )
+        if self._cloud_paused:
+            return None
+        return 0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the local pause's total duration and end time."""
+        record = self._pause_record
+        return {
+            "cloud_paused": self._cloud_paused,
+            "pause_seconds": record["seconds"] if record else None,
+            "paused_until": (
+                record["ends_at"].isoformat() if record else None
+            ),
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Sync the countdown with any pause already in progress."""
+        await super().async_added_to_hass()
+        self._sync_pause()
+
+    @callback
+    async def async_will_remove_from_hass(self) -> None:
+        """Stop the per-second tick when the entity is removed."""
+        self._stop_tick()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Re-sync the countdown whenever the coordinator data changes."""
+        self._sync_pause()
+        super()._handle_coordinator_update()
+
+    def _sync_pause(self) -> None:
+        """Align the countdown with the current pause record."""
+        record = self._pause_record
+        if record is None:
+            self._stop_tick()
+        else:
+            self._schedule_tick()
+        self.async_write_ha_state()
+
+    def _schedule_tick(self) -> None:
+        """Tick once per second while a local pause is still running."""
+        self._stop_tick()
+
+        @callback
+        def tick(now: datetime) -> None:
+            record = self._pause_record
+            if record is not None and dt_util.now() < record["ends_at"]:
+                self._tick_unsub = async_track_point_in_utc_time(
+                    self.hass, tick, dt_util.utcnow() + timedelta(seconds=1)
+                )
+            # Once the pause ends (or is resumed) the tick stops here; the
+            # switch flips the effective state on the next coordinator
+            # update, which re-syncs this sensor via _handle_coordinator_update.
+            self.async_write_ha_state()
+
+        self._tick_unsub = async_track_point_in_utc_time(
+            self.hass, tick, dt_util.utcnow() + timedelta(seconds=1)
+        )
+
+    def _stop_tick(self) -> None:
+        """Cancel the per-second tick, if any."""
+        if self._tick_unsub is not None:
+            self._tick_unsub()
+            self._tick_unsub = None

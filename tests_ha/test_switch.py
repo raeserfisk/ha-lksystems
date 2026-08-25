@@ -109,23 +109,32 @@ async def test_turn_off_sends_pause_and_updates_state_immediately(hass, fake_man
 
 
 async def test_turn_off_defaults_to_duration_helper_value(hass, fake_manager):
-    """Without explicit seconds, the pause duration helper supplies it."""
+    """Without a number entity, the legacy pause duration helper supplies it."""
     await setup_entry(hass, fake_manager)
     switch_entity_id = entity_id(hass, SWITCH_DOMAIN, SWITCH_UNIQUE_ID)
 
     hass.states.async_set("input_number.cubic_secure_pause_duration", "15")
 
-    with patch(
-        "custom_components.lksystems.switch.LKSystemsManager",
-        return_value=fake_manager,
-    ):
-        await hass.services.async_call(
-            SWITCH_DOMAIN,
-            "turn_off",
-            {"entity_id": switch_entity_id},
-            blocking=True,
-        )
-        await hass.async_block_till_done()
+    # Hide the integration's own pause duration entity so the legacy
+    # helper fallback (for installs predating the entity) is exercised.
+    coordinator = next(iter(hass.data[DOMAIN].values()))
+    saved_duration_entities = coordinator.pause_duration_entities
+    coordinator.pause_duration_entities = {}
+
+    try:
+        with patch(
+            "custom_components.lksystems.switch.LKSystemsManager",
+            return_value=fake_manager,
+        ):
+            await hass.services.async_call(
+                SWITCH_DOMAIN,
+                "turn_off",
+                {"entity_id": switch_entity_id},
+                blocking=True,
+            )
+            await hass.async_block_till_done()
+    finally:
+        coordinator.pause_duration_entities = saved_duration_entities
 
     assert ("cubic_secure_pause_leak_detection", CUBIC_IDENTITY, 900) in (
         fake_manager.calls
