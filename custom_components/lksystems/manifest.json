@@ -12,6 +12,6 @@
   "issue_tracker": "https://github.com/angoyd/ha-lksystems/issues",
   "requirements": ["aiohttp>=3.9.1"],
   "ssdp": [],
-  "version": "0.4.1",
+  "version": "0.4.2",
   "zeroconf": []
 }
